@@ -99,7 +99,7 @@ print(response["answer"])
 
 `langchain app new langserveapp`
 
-先 exit 現在的虛擬環境，然後 `cd langserveapp`，進去後再一次 poetry install，然後再把該安裝的套件安裝上 `r`
+先 exit 現在的虛擬環境，然後 `cd langserveapp`，進去後再一次 poetry install，然後再把該安裝的套件安裝上。
 
 可能需要去 toml 檔把 pydantic 改成 `pydantic = ">2"`。因為現在 LangServe 需要 1 版 pydantic ，可是其他的套件需要 2 版以上的 pydantic。
 
@@ -225,7 +225,7 @@ from fastapi.responses import RedirectResponse
 from langserve import add_routes
 from rag import rag_chain
 from pydantic import BaseModel
-import asyncio
+import json
 from linebot.v3 import (
     WebhookParser
 )
@@ -256,11 +256,13 @@ async def redirect_root_to_docs():
 # Edit this to add the chain you want to add
 add_routes(app, rag_chain, path="/rag")
 
+LINE_ACCESS_TOKEN = 'xx'
+CHANNEL_SECRET = 'xx'
 
-configuration = Configuration(access_token='xx')
+configuration = Configuration(access_token=LINE_ACCESS_TOKEN)
 async_api_client = AsyncApiClient(configuration)
 line_bot_api = AsyncMessagingApi(async_api_client)
-parser = WebhookParser('xx')
+parser = WebhookParser(CHANNEL_SECRET)
 
 
 class CallbackRequest(BaseModel):
@@ -277,8 +279,9 @@ async def callback(request: Request):
 
     body = await request.body()
     body = body.decode("utf-8")
-    print("Body: " + body)
+    user_id = ""
     try:
+        user_id = json.loads(body)["events"][0]["source"]["userId"]
         events = parser.parse(body, x_line_signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
@@ -288,9 +291,24 @@ async def callback(request: Request):
             continue
         if not isinstance(event.message, TextMessageContent):
             continue
+
+        async def send_loading_animation(chat_id):
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    'https://api.line.me/v2/bot/chat/loading/start',
+                    headers={
+                        'Content-Type': 'application/json',
+                        'Authorization': f'Bearer {LINE_ACCESS_TOKEN}'
+                    },
+                    json={
+                        'chatId': chat_id,
+                        'loadingSeconds': 10
+                    }
+                )
+                return response
         
         async def call_rag_invoke(input_text):
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.post(
                     'http://localhost:8000/rag/invoke',
                     json={'input': {'input': input_text}},
@@ -298,6 +316,8 @@ async def callback(request: Request):
                 )
                 return response.json()
         
+        await send_loading_animation(user_id)
+
         response = await call_rag_invoke(event.message.text)
     
         reply_text = response['output']['answer']
@@ -315,8 +335,9 @@ if __name__ == "__main__":
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
+
 ```
 
 
-`langchain server` 然後 `ngrok http 8000`
+`langchain server` 然後 `ngrok http 8000`，再去 LINE developer 設定 webhook，記得要放上正確的路由，以本範例為例是要在 ngrok 網址最後再加上 `/callback`。
 
