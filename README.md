@@ -1,5 +1,3 @@
-# langservedemo20240713
-
 #### 說明
 
 這是 20240713 在 Chatbot 社群分享的內容，帶大家快速建立 LangServe 的來給 Chatbot 串接用。
@@ -215,3 +213,110 @@ curl --location --request POST 'http://localhost:8000/rag/invoke' \
 ```
 
 可以進到 play ground  `http://127.0.0.1:8000/rag/playground/` 來試玩
+
+#### 改寫與串接到 LINE
+`poetry add line-bot-sdk httpx`
+
+改寫 `server.py` 如下：
+```
+
+from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi.responses import RedirectResponse
+from langserve import add_routes
+from rag import rag_chain
+from pydantic import BaseModel
+import asyncio
+from linebot.v3 import (
+    WebhookParser
+)
+from linebot.v3.exceptions import (
+    InvalidSignatureError
+)
+from linebot.v3.messaging import (
+    Configuration,
+    AsyncApiClient,
+    AsyncMessagingApi,
+    ReplyMessageRequest,
+    TextMessage
+)
+from linebot.v3.webhooks import (
+    MessageEvent,
+    TextMessageContent
+)
+import httpx
+
+app = FastAPI()
+
+
+@app.get("/")
+async def redirect_root_to_docs():
+    return RedirectResponse("/docs")
+
+
+# Edit this to add the chain you want to add
+add_routes(app, rag_chain, path="/rag")
+
+
+configuration = Configuration(access_token='xx')
+async_api_client = AsyncApiClient(configuration)
+line_bot_api = AsyncMessagingApi(async_api_client)
+parser = WebhookParser('xx')
+
+
+class CallbackRequest(BaseModel):
+    events: list
+    destination: str
+
+class RagInvokeRequest(BaseModel):
+    input: dict
+
+@app.post("/callback")
+async def callback(request: Request):
+
+    x_line_signature = request.headers['X-Line-Signature']
+
+    body = await request.body()
+    body = body.decode("utf-8")
+    print("Body: " + body)
+    try:
+        events = parser.parse(body, x_line_signature)
+    except InvalidSignatureError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    for event in events:
+        if not isinstance(event, MessageEvent):
+            continue
+        if not isinstance(event.message, TextMessageContent):
+            continue
+        
+        async def call_rag_invoke(input_text):
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    'http://localhost:8000/rag/invoke',
+                    json={'input': {'input': input_text}},
+                    headers={'Content-Type': 'application/json'}
+                )
+                return response.json()
+        
+        response = await call_rag_invoke(event.message.text)
+    
+        reply_text = response['output']['answer']
+        print("Reply text: " + reply_text)
+        await line_bot_api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=reply_text)]
+            )
+        )
+    return 'OK'
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+```
+
+
+`langchain server` 然後 `ngrok http 8000`
+
